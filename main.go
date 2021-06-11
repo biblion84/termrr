@@ -9,8 +9,9 @@ import (
 
 	"sort"
 
-	"github.com/stripe/stripe-go"
-	"github.com/stripe/stripe-go/customer"
+	"github.com/stripe/stripe-go/v72"
+	"github.com/stripe/stripe-go/v72/customer"
+	"github.com/stripe/stripe-go/v72/price"
 )
 
 type monthstats struct {
@@ -35,29 +36,53 @@ func main() {
 	}
 
 	stripe.Key = apiKey
-	stripe.LogLevel = 1
+	//stripe.DefaultLeveledLogger = &stripe.LeveledLogger{
+	//	Level: stripe.LevelDebug,
+	//}
 
 	var mrr float64
 
 	p := &stripe.CustomerListParams{}
-	p.Filters.AddFilter("limit", "", "50")
-
+	p.Filters.AddFilter("limit", "", "100")
+	p.AddExpand("data.subscriptions")
+	p.AddExpand("data.discount")
 	months := make(map[string]monthstats)
 
 	customers := customer.List(p)
 	for customers.Next() {
 		c := customers.Customer()
 
-		if c.Subs.Count > 0 {
-			subs := c.Subs.Values
+		if len(c.Subscriptions.Data) > 0 {
+			subs := c.Subscriptions.Data
 
 			var revenue float64
 
 			for _, s := range subs {
-				if s.Plan.Interval == "year" {
-					revenue += float64(s.Plan.Amount) / 12.0
-				} else {
-					revenue += float64(s.Plan.Amount * s.Quantity)
+				if s.Plan.BillingScheme == stripe.PlanBillingSchemeTiered && s.Plan.Active {
+					priceParam := &stripe.PriceParams{}
+					priceParam.AddExpand("tiers")
+					plan, err := price.Get(s.Plan.ID, priceParam)
+					if err != nil {
+						log.Fatal(err)
+					}
+					var tempRevenue float64
+					if plan.TiersMode == stripe.PriceTiersModeGraduated {
+						for i := int64(1); i <= s.Quantity; i++ { // Hopefully the array is sorted desc from upTo
+							for _, tier := range plan.Tiers {
+								if i <= tier.UpTo || tier.UpTo == 0 {
+									tempRevenue += tier.UnitAmountDecimal
+									break
+								}
+							}
+						}
+
+					}
+
+					if s.Plan.Interval == stripe.PlanIntervalYear {
+						revenue += float64(tempRevenue) / 12.0
+					} else {
+						revenue += tempRevenue
+					}
 				}
 
 				if c.Discount != nil && c.Discount.Coupon != nil {
@@ -104,10 +129,10 @@ func main() {
 }
 
 func applyCoupon(v float64, coupon *stripe.Coupon) float64 {
-	if coupon.Amount > 0 {
-		return v - float64(coupon.Amount)
-	} else if coupon.Percent > 0 {
-		return v - (float64(coupon.Percent) / 100.0)
+	if coupon.AmountOff > 0 {
+		return v - float64(coupon.AmountOff)
+	} else if coupon.PercentOff > 0 {
+		return v - ((float64(coupon.PercentOff) / 100.0) * v)
 	}
 	return v
 }
