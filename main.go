@@ -56,9 +56,13 @@ func main() {
 			subs := c.Subscriptions.Data
 
 			var revenue float64
-
 			for _, s := range subs {
-				if s.Plan.BillingScheme == stripe.PlanBillingSchemeTiered && s.Plan.Active {
+				now := time.Now()
+				nextYear := time.Date(now.Year()+1, now.Month(), 0, 0, 0, 0, 0, now.Location())
+				if s.CancelAtPeriodEnd && time.Unix(s.CanceledAt, 0).Before(nextYear) {
+					continue
+				}
+				if s.Plan.BillingScheme == stripe.PlanBillingSchemeTiered && s.Status == stripe.SubscriptionStatusActive {
 					priceParam := &stripe.PriceParams{}
 					priceParam.AddExpand("tiers")
 					plan, err := price.Get(s.Plan.ID, priceParam)
@@ -86,11 +90,17 @@ func main() {
 				}
 
 				if c.Discount != nil && c.Discount.Coupon != nil {
-					revenue = applyCoupon(revenue, c.Discount.Coupon)
+					couponEnd := time.Unix(c.Discount.End, 0)
+					if couponEnd.After(nextYear) {
+						revenue = applyCoupon(revenue, c.Discount.Coupon)
+					}
 				}
 
 				if s.Discount != nil && s.Discount.Coupon != nil {
-					revenue = applyCoupon(revenue, s.Discount.Coupon)
+					couponEnd := time.Unix(s.Discount.End, 0)
+					if couponEnd.After(nextYear) {
+						revenue = applyCoupon(revenue, s.Discount.Coupon)
+					}
 				}
 			}
 
