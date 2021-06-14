@@ -59,48 +59,55 @@ func main() {
 			for _, s := range subs {
 				now := time.Now()
 				nextYear := time.Date(now.Year()+1, now.Month(), 0, 0, 0, 0, 0, now.Location())
+
 				if s.CancelAtPeriodEnd && time.Unix(s.CanceledAt, 0).Before(nextYear) {
 					continue
 				}
-				if s.Plan.BillingScheme == stripe.PlanBillingSchemeTiered && s.Status == stripe.SubscriptionStatusActive {
-					priceParam := &stripe.PriceParams{}
-					priceParam.AddExpand("tiers")
-					plan, err := price.Get(s.Plan.ID, priceParam)
-					if err != nil {
-						log.Fatal(err)
-					}
-					var tempRevenue float64
-					if plan.TiersMode == stripe.PriceTiersModeGraduated {
-						for i := int64(1); i <= s.Quantity; i++ { // Hopefully the array is sorted desc from upTo
-							for _, tier := range plan.Tiers {
-								if i <= tier.UpTo || tier.UpTo == 0 {
-									tempRevenue += tier.UnitAmountDecimal
-									break
+				if s.Status != stripe.SubscriptionStatusActive {
+					continue
+				}
+
+				switch s.Plan.BillingScheme {
+				case stripe.PlanBillingSchemeTiered:
+					{
+						priceParam := &stripe.PriceParams{}
+						priceParam.AddExpand("tiers")
+						plan, err := price.Get(s.Plan.ID, priceParam)
+						if err != nil {
+							log.Fatal(err)
+						}
+						var tempRevenue float64
+						if plan.TiersMode == stripe.PriceTiersModeGraduated {
+							for i := int64(1); i <= s.Quantity; i++ { // Hopefully the array is sorted desc from upTo
+								for _, tier := range plan.Tiers {
+									if i <= tier.UpTo || tier.UpTo == 0 {
+										tempRevenue += tier.UnitAmountDecimal
+										break
+									}
 								}
 							}
 						}
+						if s.Plan.Interval == stripe.PlanIntervalYear {
+							revenue += float64(tempRevenue) / 12.0
+						} else {
+							revenue += tempRevenue
+						}
+						if c.Discount != nil && c.Discount.Coupon != nil {
+							couponEnd := time.Unix(c.Discount.End, 0)
+							if couponEnd.After(nextYear) {
+								revenue = applyCoupon(revenue, c.Discount.Coupon)
+							}
+						}
 
+						if s.Discount != nil && s.Discount.Coupon != nil {
+							couponEnd := time.Unix(s.Discount.End, 0)
+							if couponEnd.After(nextYear) {
+								revenue = applyCoupon(revenue, s.Discount.Coupon)
+							}
+						}
 					}
-
-					if s.Plan.Interval == stripe.PlanIntervalYear {
-						revenue += float64(tempRevenue) / 12.0
-					} else {
-						revenue += tempRevenue
-					}
-				}
-
-				if c.Discount != nil && c.Discount.Coupon != nil {
-					couponEnd := time.Unix(c.Discount.End, 0)
-					if couponEnd.After(nextYear) {
-						revenue = applyCoupon(revenue, c.Discount.Coupon)
-					}
-				}
-
-				if s.Discount != nil && s.Discount.Coupon != nil {
-					couponEnd := time.Unix(s.Discount.End, 0)
-					if couponEnd.After(nextYear) {
-						revenue = applyCoupon(revenue, s.Discount.Coupon)
-					}
+				default:
+					log.Println("UNSUPPORTED BILLING SCHEME")
 				}
 			}
 
