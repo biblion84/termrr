@@ -15,9 +15,9 @@ import (
 )
 
 type monthstats struct {
-	revenue   float64
-	customers int
-	key       string
+	revenue       float64
+	subscriptions int
+	key           string
 }
 
 func main() {
@@ -36,9 +36,6 @@ func main() {
 	}
 
 	stripe.Key = apiKey
-	//stripe.DefaultLeveledLogger = &stripe.LeveledLogger{
-	//	Level: stripe.LevelDebug,
-	//}
 
 	var mrr float64
 
@@ -46,17 +43,19 @@ func main() {
 	p.Filters.AddFilter("limit", "", "100")
 	p.AddExpand("data.subscriptions")
 	p.AddExpand("data.discount")
-	months := make(map[string]monthstats)
+	months := make(map[string]monthstats) // [YEAR-MM]
 
 	customers := customer.List(p)
 	for customers.Next() {
+		var customerRevenue float64
 		c := customers.Customer()
 
 		if len(c.Subscriptions.Data) > 0 {
 			subs := c.Subscriptions.Data
 
-			var revenue float64
 			for _, s := range subs {
+				var subscriptionRevenue float64
+
 				now := time.Now()
 				nextYear := time.Date(now.Year()+1, now.Month(), 0, 0, 0, 0, 0, now.Location())
 
@@ -76,55 +75,44 @@ func main() {
 						if err != nil {
 							log.Fatal(err)
 						}
-						var tempRevenue float64
 						if plan.TiersMode == stripe.PriceTiersModeGraduated {
 							for i := int64(1); i <= s.Quantity; i++ { // Hopefully the array is sorted desc from upTo
 								for _, tier := range plan.Tiers {
 									if i <= tier.UpTo || tier.UpTo == 0 {
-										tempRevenue += tier.UnitAmountDecimal
+										subscriptionRevenue += tier.UnitAmountDecimal
 										break
 									}
 								}
 							}
 						}
 						if s.Plan.Interval == stripe.PlanIntervalYear {
-							revenue += float64(tempRevenue) / 12.0
-						} else {
-							revenue += tempRevenue
+							subscriptionRevenue = float64(subscriptionRevenue) / 12.0
 						}
-						if c.Discount != nil && c.Discount.Coupon != nil {
-							couponEnd := time.Unix(c.Discount.End, 0)
-							if couponEnd.After(nextYear) {
-								revenue = applyCoupon(revenue, c.Discount.Coupon)
-							}
-						}
+						subscriptionRevenue = applyDiscount(subscriptionRevenue, s.Discount)
 
-						if s.Discount != nil && s.Discount.Coupon != nil {
-							couponEnd := time.Unix(s.Discount.End, 0)
-							if couponEnd.After(nextYear) {
-								revenue = applyCoupon(revenue, s.Discount.Coupon)
-							}
-						}
+						customerRevenue += subscriptionRevenue
 					}
 				default:
 					log.Println("UNSUPPORTED BILLING SCHEME")
 				}
+				// logging monthly stats
+				d := time.Unix(s.StartDate, 0)
+				monthKey := d.Format("2006-01")
+
+				if stats, ok := months[monthKey]; ok {
+					stats.revenue += subscriptionRevenue / 100.0
+					stats.subscriptions++
+					months[monthKey] = stats
+				} else {
+					stats = monthstats{subscriptions: 1, revenue: subscriptionRevenue / 100.0, key: monthKey}
+					months[monthKey] = stats
+				}
+
 			}
+			customerRevenue = applyDiscount(customerRevenue, c.Discount)
 
-			mrr += revenue / 100.0
+			mrr += customerRevenue / 100.0
 
-			// logging monthly stats
-			d := time.Unix(c.Created, 0)
-			monthKey := d.Format("2006-01")
-
-			if stats, ok := months[monthKey]; ok {
-				stats.revenue += revenue / 100.0
-				stats.customers++
-				months[monthKey] = stats
-			} else {
-				stats = monthstats{customers: 1, revenue: revenue / 100.0, key: monthKey}
-				months[monthKey] = stats
-			}
 		} else {
 			log.Println("this customer has no subs")
 		}
@@ -141,11 +129,24 @@ func main() {
 	fmt.Println("Month over month stats\n=====================================")
 	for i := len(keys) - 1; i >= 0; i-- {
 		k := keys[i]
-		fmt.Println(k, fmt.Sprintf("New customers: %d", months[k].customers), fmt.Sprintf("MRR: %.2f", months[k].revenue))
+		fmt.Println(k, fmt.Sprintf("New subscriptions: %d", months[k].subscriptions), fmt.Sprintf("MRR: %.2f", months[k].revenue))
 	}
 }
 
-func applyCoupon(v float64, coupon *stripe.Coupon) float64 {
+func applyDiscount(v float64, discount *stripe.Discount) float64 {
+	if discount == nil || discount.Coupon == nil {
+		return v
+	}
+
+	// If the discount end in less than a year, we don't take it into account for the mrr
+	now := time.Now()
+	nextYear := time.Date(now.Year()+1, now.Month(), 0, 0, 0, 0, 0, now.Location())
+	discountEnd := time.Unix(discount.End, 0)
+	if discountEnd.Before(nextYear) {
+		return v
+	}
+
+	coupon := discount.Coupon
 	if coupon.AmountOff > 0 {
 		return v - float64(coupon.AmountOff)
 	} else if coupon.PercentOff > 0 {
