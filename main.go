@@ -20,6 +20,11 @@ type monthstats struct {
 	key           string
 }
 
+type subscriptionStat struct {
+	startDate time.Time
+	revenue   float64
+}
+
 func main() {
 	key := flag.String("key", "", "this is your stripe key, you may use an environment variable STRIPE_KEY.")
 	flag.Parse()
@@ -45,9 +50,9 @@ func main() {
 	p.AddExpand("data.discount")
 	months := make(map[string]monthstats) // [YEAR-MM]
 
+	var subscriptions []subscriptionStat
 	customers := customer.List(p)
 	for customers.Next() {
-		var customerRevenue float64
 		c := customers.Customer()
 
 		if len(c.Subscriptions.Data) > 0 {
@@ -88,33 +93,35 @@ func main() {
 						if s.Plan.Interval == stripe.PlanIntervalYear {
 							subscriptionRevenue = float64(subscriptionRevenue) / 12.0
 						}
-						subscriptionRevenue = applyDiscount(subscriptionRevenue, s.Discount)
+						// Two discounts can be at play, at subscription level and/or at the customer level
+						subscriptionRevenue = applyDiscount(applyDiscount(subscriptionRevenue, s.Discount), c.Discount)
 
-						customerRevenue += subscriptionRevenue
+						subscriptions = append(subscriptions, subscriptionStat{
+							startDate: time.Unix(s.StartDate, 0),
+							revenue:   subscriptionRevenue / 100,
+						})
 					}
 				default:
 					log.Println("UNSUPPORTED BILLING SCHEME")
 				}
-				// logging monthly stats
-				d := time.Unix(s.StartDate, 0)
-				monthKey := d.Format("2006-01")
-
-				if stats, ok := months[monthKey]; ok {
-					stats.revenue += subscriptionRevenue / 100.0
-					stats.subscriptions++
-					months[monthKey] = stats
-				} else {
-					stats = monthstats{subscriptions: 1, revenue: subscriptionRevenue / 100.0, key: monthKey}
-					months[monthKey] = stats
-				}
-
 			}
-			customerRevenue = applyDiscount(customerRevenue, c.Discount)
-
-			mrr += customerRevenue / 100.0
-
 		} else {
 			log.Println("this customer has no subs")
+		}
+	}
+
+	for _, s := range subscriptions {
+		mrr += s.revenue
+
+		monthKey := s.startDate.Format("2006-01")
+
+		if stats, ok := months[monthKey]; ok {
+			stats.revenue += s.revenue
+			stats.subscriptions++
+			months[monthKey] = stats
+		} else {
+			stats = monthstats{subscriptions: 1, revenue: s.revenue, key: monthKey}
+			months[monthKey] = stats
 		}
 	}
 
@@ -131,7 +138,36 @@ func main() {
 		k := keys[i]
 		fmt.Println(k, fmt.Sprintf("New subscriptions: %d", months[k].subscriptions), fmt.Sprintf("MRR: %.2f", months[k].revenue))
 	}
+
+	sort.Slice(subscriptions, func(i, j int) bool {
+		return subscriptions[i].startDate.After(subscriptions[j].startDate)
+	})
+
+	fmt.Printf("MRR Last Day : %.1f\n", getMrrLastPeriod(time.Now().Add(-time.Hour*24), subscriptions))
+	fmt.Printf("MRR Last 7 days : %.1f\n", getMrrLastPeriod(time.Now().Add(-time.Hour*24*7), subscriptions))
+	fmt.Printf("MRR Last 30 days : %.1f\n", getMrrLastPeriod(time.Now().Add(-time.Hour*24*30), subscriptions))
+	fmt.Printf("MRR Last 90 days : %.1f\n", getMrrLastPeriod(time.Now().Add(-time.Hour*24*90), subscriptions))
 }
+
+// getMrrLastPeriod return the MRR since period
+// subscriptions must be sorted asc by startDate
+func getMrrLastPeriod(period time.Time, subscriptions []subscriptionStat) float64 {
+	periodMrr := 0.0
+	periodIndex := sort.Search(len(subscriptions), func(i int) bool {
+		return period.After(subscriptions[i].startDate)
+	})
+	periodSubs := subscriptions[:periodIndex]
+	for _, s := range periodSubs {
+		periodMrr += s.revenue
+	}
+	return periodMrr
+}
+
+//func getSubcriptionsBefore(subscriptions []subscriptionStat, allBefore time.Time){
+//	index := sort.Search(len(subscriptions), func(i int) bool {
+//		return subscriptions[i].startDate.Before(time.Now().Add(-time.Hour * 24 * 7 * 30))
+//	})
+//}
 
 func applyDiscount(v float64, discount *stripe.Discount) float64 {
 	if discount == nil || discount.Coupon == nil {
